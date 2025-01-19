@@ -1,15 +1,102 @@
-use std::env;
+use clap::{Parser, Subcommand};
+use hashes::Hashes;
+use serde::Deserialize;
+use std::{env, path::PathBuf};
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
+#[derive(Debug, Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
 
-    if command == "decode" {
-        let encoded_value = &args[2];
-        let decoded_value = decode_bencoded_value(encoded_value);
-        println!("{}", decoded_value.0.to_string());
-    } else {
-        println!("unknown command: {}", args[1]);
+#[derive(Subcommand, Debug)]
+enum Command {
+    Decode { value: String },
+    Info { torrent: PathBuf },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Torrent {
+    announce: String,
+    info: Info,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Info {
+    name: String,
+    #[serde(rename = "piece length")]
+    piece_len: usize,
+    pieces: Hashes,
+    #[serde(flatten)]
+    keys: Keys,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum Keys {
+    SingleFile { length: usize },
+    Multifile { files: File },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct File {
+    length: usize,
+    path: Vec<String>,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    match args.command {
+        Command::Decode { value } => {
+            let v = decode_bencoded_value(&value).0;
+            println!("{v}");
+        }
+        Command::Info { torrent } => todo!(),
+    }
+
+    Ok(())
+}
+
+mod hashes {
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+    use std::fmt;
+
+    #[derive(Debug, Clone)]
+    pub struct Hashes(Vec<[u8; 20]>);
+    struct HashesVisitor;
+
+    impl<'de> Visitor<'de> for HashesVisitor {
+        type Value = Hashes;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("an byte string whose length is a multiple of 20")
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.len() % 20 != 0 {
+                return Err(E::custom(format!("length is {}", v.len())));
+            }
+
+            Ok(Hashes(
+                v.chunks_exact(20)
+                    .map(|slice_20| slice_20.try_into().expect("guaranteed to be length 20"))
+                    .collect(),
+            ))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Hashes {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(HashesVisitor)
+        }
     }
 }
 
@@ -57,7 +144,7 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
             return (dict.into(), &rest[1..]);
         }
         Some('0'..='9') => {
-            if let Some((len, rest)) = encoded_value.split_at(1).1.split_once(':') {
+            if let Some((len, rest)) = encoded_value.split_once(':') {
                 if let Ok(len) = len.parse::<usize>() {
                     return (rest[..len].to_string().into(), &rest[len..]);
                 }
@@ -65,5 +152,6 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
         }
         _ => {}
     }
-    panic!("program paniked while finding the decoded value")
+
+    panic!("Unhandled encoded value: {}", encoded_value)
 }

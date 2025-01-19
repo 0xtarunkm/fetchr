@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = "0.12.12"
-serde = { version = "1.0.217", features = ["derive"] }
+anyhow = "1.0.95"
+clap = { version = "4.5.26", features = ["derive"] }
+hex = "0.4.3"
+regex = "1.11.1"
+reqwest = { version = "0.12.12", features = ["blocking", "json"] }
+serde = { version = "1.0.136", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_bytes = "0.11.15"
 serde_json = "1.0.135"
 serde_urlencoded = "0.7.1"
+sha1 = "0.10.6"
+tempfile = "3.15.0"
+thiserror = "2.0.11"
+tokio = { version = "1.43.0", features = ["full"] }
