@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use hashes::Hashes;
-use serde::{Deserialize, Serialize};
+use my_bittorrent::{Keys, Torrent, TrackerRequest, TrackerResponse};
 use sha1::{Digest, Sha1};
 
 #[derive(Debug, Parser)]
@@ -17,38 +16,11 @@ struct Args {
 enum Command {
     Decode { value: String },
     Info { torrent: PathBuf },
+    Peers { torrent: PathBuf },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Torrent {
-    pub announce: String,
-    pub info: Info,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Info {
-    pub name: String,
-    #[serde(rename = "piece length")]
-    pub plength: usize,
-    pub pieces: Hashes,
-    #[serde(flatten)]
-    pub keys: Keys,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum Keys {
-    SingleFile { length: usize },
-    MultiFile { files: Vec<File> },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct File {
-    pub length: usize,
-    pub path: Vec<String>,
-}
-
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
@@ -61,78 +33,60 @@ fn main() -> anyhow::Result<()> {
             let t: Torrent =
                 serde_bencode::from_bytes(&dot_torrent).context("parse torrent file")?;
             println!("Tracker URL: {}", t.announce);
-            if let Keys::SingleFile { length } = t.info.keys {
-                println!("Length: {length}");
+            let length = if let Keys::SingleFile { length } = t.info.keys {
+                length
             } else {
                 todo!();
-            }
-            let info_encoded =
-                serde_bencode::to_bytes(&t.info).context("re-encode info section")?;
-            let mut hasher = Sha1::new();
-            hasher.update(&info_encoded);
-            let info_hash = hasher.finalize();
+            };
+            println!("{length}");
+            let info_hash = t.info_hash();
             println!("Info Hash: {}", hex::encode(info_hash));
-            println!("Piece Lenght: {}", t.info.plength);
+            println!("Piece Length: {}", t.info.plength);
             println!("Piece Hashes:");
             for hash in t.info.pieces.0 {
                 println!("{}", hex::encode(&hash));
             }
         }
+        Command::Peers { torrent } => {
+            let dot_torrent = std::fs::read(torrent).context("read torrent file")?;
+            let t: Torrent =
+                serde_bencode::from_bytes(&dot_torrent).context("parse torrent file")?;
+            let length = if let Keys::SingleFile { length } = t.info.keys {
+                length
+            } else {
+                todo!();
+            };
+            let info_hash = t.info_hash();
+
+            let request = TrackerRequest {
+                info_hash: info_hash.into(),
+                peer_id: String::from("00112233445566778899"),
+                port: 6881,
+                uploaded: 0,
+                downloaded: 0,
+                left: length,
+                compact: 1,
+            };
+
+            let url_params =
+                serde_urlencoded::to_string(&request).context("url-encode tracker parameters")?;
+            let tracker_url = format!(
+                "{}?{}&info_hash={}",
+                t.announce,
+                url_params,
+                &urlencode(&info_hash)
+            );
+            let response = reqwest::get(tracker_url).await.context("query tracker")?;
+            let response = response.bytes().await.context("fetch tracker response")?;
+            let response: TrackerResponse =
+                serde_bencode::from_bytes(&response).context("parse tracker response")?;
+            for peer in &response.peers.0 {
+                println!("{}:{}", peer.ip(), peer.port());
+            }
+        }
     }
 
     Ok(())
-}
-
-mod hashes {
-    use serde::de::{self, Deserialize, Deserializer, Visitor};
-    use serde::ser::{Serialize, Serializer};
-
-    use std::fmt;
-
-    #[derive(Debug, Clone)]
-    pub struct Hashes(pub Vec<[u8; 20]>);
-    struct HashesVisitor;
-
-    impl<'de> Visitor<'de> for HashesVisitor {
-        type Value = Hashes;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a byte string whose length is a multiple of 20")
-        }
-
-        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            if v.len() % 20 != 0 {
-                return Err(E::custom(format!("length is {}", v.len())));
-            }
-            Ok(Hashes(
-                v.chunks_exact(20)
-                    .map(|slice_20| slice_20.try_into().expect("guaranteed to be length 20"))
-                    .collect(),
-            ))
-        }
-    }
-
-    impl<'de> Deserialize<'de> for Hashes {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            deserializer.deserialize_bytes(HashesVisitor)
-        }
-    }
-
-    impl Serialize for Hashes {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let single_slice = self.0.concat();
-            serializer.serialize_bytes(&single_slice)
-        }
-    }
 }
 
 fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
@@ -187,4 +141,13 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
     }
 
     panic!("unhandled encoded value: {}", encoded_value);
+}
+
+fn urlencode(t: &[u8; 20]) -> String {
+    let mut encoded = String::with_capacity(3 * t.len());
+    for &byte in t {
+        encoded.push('%');
+        encoded.push_str(&hex::encode(&[byte]));
+    }
+    encoded
 }
